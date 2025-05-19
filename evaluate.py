@@ -41,9 +41,13 @@ def evaluate_statistical_similarity(real_data, synthetic_data):
     # Categorical features
     for col in real_data.select_dtypes(include=["object", "category"]).columns:
         if col in synthetic_data.columns:
+            # Convert to string type first
+            real_col = real_data[col].astype(str)
+            syn_col = synthetic_data[col].astype(str)
+
             # Get distributions
-            orig_dist = real_data[col].value_counts(normalize=True)
-            syn_dist = synthetic_data[col].value_counts(normalize=True)
+            orig_dist = real_col.value_counts(normalize=True)
+            syn_dist = syn_col.value_counts(normalize=True)
 
             # Ensure same categories
             all_cats = set(orig_dist.index) | set(syn_dist.index)
@@ -66,28 +70,28 @@ def evaluate_data_utility(real_data, synthetic_data, info):
     """Evaluate data utility for downstream tasks."""
     results = {}
 
-    # Prepare data
-    num_cols = info["num_col_idx"]
-    cat_cols = info["cat_col_idx"]
-    target_col = info["target_col_idx"][0]  # Assuming single target
+    # Get column names from the data
+    num_cols = [real_data.columns[i] for i in info["num_col_idx"]]
+    cat_cols = [real_data.columns[i] for i in info["cat_col_idx"]]
+    target_col = real_data.columns[info["target_col_idx"][0]]
 
     # Split features and target
-    X_real = real_data.iloc[:, num_cols + cat_cols].copy()
-    y_real = real_data.iloc[:, target_col].copy()
-    X_syn = synthetic_data.iloc[:, num_cols + cat_cols].copy()
-    y_syn = synthetic_data.iloc[:, target_col].copy()
+    X_real = real_data[num_cols + cat_cols].copy()
+    y_real = real_data[target_col].copy()
+    X_syn = synthetic_data[num_cols + cat_cols].copy()
+    y_syn = synthetic_data[target_col].copy()
 
     # Handle categorical features
     for col in cat_cols:
+        # Convert to string type first to avoid dtype issues
+        X_real[col] = X_real[col].astype(str)
+        X_syn[col] = X_syn[col].astype(str)
+
         # Get all unique categories from both datasets
-        all_categories = pd.concat([X_real.iloc[:, col], X_syn.iloc[:, col]]).unique()
+        all_categories = pd.concat([X_real[col], X_syn[col]]).unique()
         # Convert to categorical with all possible categories
-        X_real.iloc[:, col] = pd.Categorical(
-            X_real.iloc[:, col], categories=all_categories
-        )
-        X_syn.iloc[:, col] = pd.Categorical(
-            X_syn.iloc[:, col], categories=all_categories
-        )
+        X_real[col] = pd.Categorical(X_real[col], categories=all_categories)
+        X_syn[col] = pd.Categorical(X_syn[col], categories=all_categories)
 
     # Now perform one-hot encoding
     X_real = pd.get_dummies(X_real, columns=cat_cols)
