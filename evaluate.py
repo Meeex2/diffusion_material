@@ -1,12 +1,13 @@
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.metrics import mean_squared_error, accuracy_score
-from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.metrics import mean_squared_error
 from scipy.stats import wasserstein_distance
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
+import json
+import os
 
 
 def load_data(real_path, synthetic_path):
@@ -16,40 +17,47 @@ def load_data(real_path, synthetic_path):
     return real_data, synthetic_data
 
 
-def evaluate_statistical_similarity(real_data, synthetic_data, info):
+def evaluate_statistical_similarity(real_data, synthetic_data):
     """Evaluate statistical similarity between real and synthetic data."""
-    results = {}
+    results = {"numerical_metrics": {}, "categorical_metrics": {}}
 
     # Numerical features
-    num_cols = info["num_col_idx"]
-    for col in num_cols:
-        real_col = real_data.iloc[:, col]
-        syn_col = synthetic_data.iloc[:, col]
+    for col in real_data.select_dtypes(include=[np.number]).columns:
+        if col in synthetic_data.columns:
+            real_col = real_data[col]
+            syn_col = synthetic_data[col]
 
-        # Basic statistics
-        results[f"mean_diff_{col}"] = abs(real_col.mean() - syn_col.mean())
-        results[f"std_diff_{col}"] = abs(real_col.std() - syn_col.std())
+            # Basic statistics
+            wd = wasserstein_distance(real_col, syn_col)
+            mse = mean_squared_error(real_col, syn_col)
 
-        # Wasserstein distance
-        results[f"wasserstein_{col}"] = wasserstein_distance(real_col, syn_col)
+            results["numerical_metrics"][col] = {
+                "wasserstein": wd,
+                "mse": mse,
+                "mean_diff": abs(real_col.mean() - syn_col.mean()),
+                "std_diff": abs(real_col.std() - syn_col.std()),
+            }
 
     # Categorical features
-    cat_cols = info["cat_col_idx"]
-    for col in cat_cols:
-        real_col = real_data.iloc[:, col]
-        syn_col = synthetic_data.iloc[:, col]
+    for col in real_data.select_dtypes(include=["object", "category"]).columns:
+        if col in synthetic_data.columns:
+            # Get distributions
+            orig_dist = real_data[col].value_counts(normalize=True)
+            syn_dist = synthetic_data[col].value_counts(normalize=True)
 
-        # Distribution similarity
-        real_dist = real_col.value_counts(normalize=True)
-        syn_dist = syn_col.value_counts(normalize=True)
+            # Ensure same categories
+            all_cats = set(orig_dist.index) | set(syn_dist.index)
+            orig_dist = orig_dist.reindex(all_cats, fill_value=0)
+            syn_dist = syn_dist.reindex(all_cats, fill_value=0)
 
-        # Ensure same categories
-        all_cats = set(real_dist.index) | set(syn_dist.index)
-        real_dist = real_dist.reindex(all_cats, fill_value=0)
-        syn_dist = syn_dist.reindex(all_cats, fill_value=0)
+            # Calculate metrics
+            wd = wasserstein_distance(orig_dist, syn_dist)
+            tv_distance = 0.5 * np.sum(np.abs(orig_dist - syn_dist))
 
-        # TV distance
-        results[f"tv_distance_{col}"] = 0.5 * np.sum(np.abs(real_dist - syn_dist))
+            results["categorical_metrics"][col] = {
+                "wasserstein": wd,
+                "tv_distance": tv_distance,
+            }
 
     return results
 
@@ -64,34 +72,57 @@ def evaluate_data_utility(real_data, synthetic_data, info):
     target_col = info["target_col_idx"][0]  # Assuming single target
 
     # Split features and target
-    X_real = real_data.iloc[:, num_cols + cat_cols]
-    y_real = real_data.iloc[:, target_col]
-    X_syn = synthetic_data.iloc[:, num_cols + cat_cols]
-    y_syn = synthetic_data.iloc[:, target_col]
+    X_real = real_data.iloc[:, num_cols + cat_cols].copy()
+    y_real = real_data.iloc[:, target_col].copy()
+    X_syn = synthetic_data.iloc[:, num_cols + cat_cols].copy()
+    y_syn = synthetic_data.iloc[:, target_col].copy()
 
     # Handle categorical features
-    X_real = pd.get_dummies(X_real)
-    X_syn = pd.get_dummies(X_syn)
+    for col in cat_cols:
+        # Get all unique categories from both datasets
+        all_categories = pd.concat([X_real.iloc[:, col], X_syn.iloc[:, col]]).unique()
+        # Convert to categorical with all possible categories
+        X_real.iloc[:, col] = pd.Categorical(
+            X_real.iloc[:, col], categories=all_categories
+        )
+        X_syn.iloc[:, col] = pd.Categorical(
+            X_syn.iloc[:, col], categories=all_categories
+        )
 
-    # Ensure same columns
-    common_cols = list(set(X_real.columns) & set(X_syn.columns))
-    X_real = X_real[common_cols]
-    X_syn = X_syn[common_cols]
+    # Now perform one-hot encoding
+    X_real = pd.get_dummies(X_real, columns=cat_cols)
+    X_syn = pd.get_dummies(X_syn, columns=cat_cols)
+
+    # Ensure same columns in both datasets
+    all_columns = list(set(X_real.columns) | set(X_syn.columns))
+    X_real = X_real.reindex(columns=all_columns, fill_value=0)
+    X_syn = X_syn.reindex(columns=all_columns, fill_value=0)
 
     # Handle target variable based on task type
     if info["task_type"] == "classification":
-        # For classification, ensure target is properly encoded
         from sklearn.preprocessing import LabelEncoder
+        from sklearn.metrics import (
+            accuracy_score,
+            precision_score,
+            recall_score,
+            f1_score,
+        )
 
         le = LabelEncoder()
         y_real = le.fit_transform(y_real)
         y_syn = le.transform(y_syn)
 
         # Train on synthetic, test on real
+        from sklearn.linear_model import LogisticRegression
+
         model = LogisticRegression(max_iter=1000)
         model.fit(X_syn, y_syn)
         y_pred = model.predict(X_real)
+
         results["accuracy"] = accuracy_score(y_real, y_pred)
+        results["precision"] = precision_score(y_real, y_pred, average="weighted")
+        results["recall"] = recall_score(y_real, y_pred, average="weighted")
+        results["f1"] = f1_score(y_real, y_pred, average="weighted")
 
         # Train on real, test on real (baseline)
         model_baseline = LogisticRegression(max_iter=1000)
@@ -99,15 +130,10 @@ def evaluate_data_utility(real_data, synthetic_data, info):
         y_pred_baseline = model_baseline.predict(X_real)
         results["baseline_accuracy"] = accuracy_score(y_real, y_pred_baseline)
 
-        # Additional classification metrics
-        from sklearn.metrics import precision_score, recall_score, f1_score
-
-        results["precision"] = precision_score(y_real, y_pred, average="weighted")
-        results["recall"] = recall_score(y_real, y_pred, average="weighted")
-        results["f1"] = f1_score(y_real, y_pred, average="weighted")
-
     else:  # regression
-        # For regression, ensure target is numeric
+        from sklearn.linear_model import LinearRegression
+
+        # Ensure target is numeric
         y_real = pd.to_numeric(y_real, errors="coerce")
         y_syn = pd.to_numeric(y_syn, errors="coerce")
 
@@ -135,58 +161,44 @@ def evaluate_data_utility(real_data, synthetic_data, info):
     return results
 
 
-def plot_distributions(real_data, synthetic_data, info, save_path="distributions.png"):
+def plot_distributions(real_data, synthetic_data, results, save_dir="evaluation_plots"):
     """Plot distributions of real vs synthetic data."""
-    num_cols = info["num_col_idx"]
-    cat_cols = info["cat_col_idx"]
+    os.makedirs(save_dir, exist_ok=True)
 
-    n_features = len(num_cols) + len(cat_cols)
-    n_cols = 3
-    n_rows = (n_features + n_cols - 1) // n_cols
+    # Plot numerical distributions
+    num_cols = list(results["numerical_metrics"].keys())
+    n_cols = min(4, len(num_cols))
+    n_rows = (len(num_cols) + n_cols - 1) // n_cols
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5 * n_rows))
-    axes = axes.flatten()
-
-    for idx, col in enumerate(num_cols + cat_cols):
-        ax = axes[idx]
-
-        if col in num_cols:
-            # Numerical feature
-            sns.kdeplot(data=real_data.iloc[:, col], ax=ax, label="Real", color="blue")
-            sns.kdeplot(
-                data=synthetic_data.iloc[:, col], ax=ax, label="Synthetic", color="red"
-            )
-        else:
-            # Categorical feature
-            real_dist = real_data.iloc[:, col].value_counts(normalize=True)
-            syn_dist = synthetic_data.iloc[:, col].value_counts(normalize=True)
-
-            x = np.arange(len(real_dist))
-            width = 0.35
-
-            ax.bar(
-                x - width / 2, real_dist, width, label="Real", color="blue", alpha=0.6
-            )
-            ax.bar(
-                x + width / 2,
-                syn_dist,
-                width,
-                label="Synthetic",
-                color="red",
-                alpha=0.6,
-            )
-            ax.set_xticks(x)
-            ax.set_xticklabels(real_dist.index, rotation=45)
-
-        ax.set_title(f"Feature {col}")
-        ax.legend()
-
-    # Remove empty subplots
-    for idx in range(len(num_cols + cat_cols), len(axes)):
-        fig.delaxes(axes[idx])
-
+    plt.figure(figsize=(15, 4 * n_rows))
+    for i, col in enumerate(num_cols):
+        plt.subplot(n_rows, n_cols, i + 1)
+        plt.hist(real_data[col], alpha=0.5, label="Real", bins=30)
+        plt.hist(synthetic_data[col], alpha=0.5, label="Synthetic", bins=30)
+        plt.title(f"{col}\nWD: {results['numerical_metrics'][col]['wasserstein']:.3f}")
+        plt.legend()
     plt.tight_layout()
-    plt.savefig(save_path)
+    plt.savefig(os.path.join(save_dir, "numerical_distributions.png"))
+    plt.close()
+
+    # Plot categorical distributions
+    cat_cols = list(results["categorical_metrics"].keys())
+    n_cols = min(4, len(cat_cols))
+    n_rows = (len(cat_cols) + n_cols - 1) // n_cols
+
+    plt.figure(figsize=(15, 4 * n_rows))
+    for i, col in enumerate(cat_cols):
+        plt.subplot(n_rows, n_cols, i + 1)
+        orig_dist = real_data[col].value_counts(normalize=True)
+        syn_dist = synthetic_data[col].value_counts(normalize=True)
+        plt.bar(range(len(orig_dist)), orig_dist.values, alpha=0.5, label="Real")
+        plt.bar(range(len(syn_dist)), syn_dist.values, alpha=0.5, label="Synthetic")
+        plt.title(
+            f"{col}\nWD: {results['categorical_metrics'][col]['wasserstein']:.3f}"
+        )
+        plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "categorical_distributions.png"))
     plt.close()
 
 
@@ -203,22 +215,31 @@ def main():
     real_data, synthetic_data = load_data(args.real_path, args.synthetic_path)
 
     # Load info
-    import json
-
     with open(f"data/{args.dataname}/info.json", "r") as f:
         info = json.load(f)
 
-    # Evaluate
+    # Evaluate statistical similarity
     print("Evaluating statistical similarity...")
-    stat_results = evaluate_statistical_similarity(real_data, synthetic_data, info)
+    stat_results = evaluate_statistical_similarity(real_data, synthetic_data)
 
+    # Evaluate data utility
     print("\nEvaluating data utility...")
     utility_results = evaluate_data_utility(real_data, synthetic_data, info)
 
     # Print results
-    print("\nStatistical Similarity Results:")
-    for metric, value in stat_results.items():
-        print(f"{metric}: {value:.4f}")
+    print("\nNumerical Features Quality:")
+    for col, metrics in stat_results["numerical_metrics"].items():
+        print(f"\n{col}:")
+        print(f"  Wasserstein Distance: {metrics['wasserstein']:.4f}")
+        print(f"  MSE: {metrics['mse']:.4f}")
+        print(f"  Mean Difference: {metrics['mean_diff']:.4f}")
+        print(f"  Std Difference: {metrics['std_diff']:.4f}")
+
+    print("\nCategorical Features Quality:")
+    for col, metrics in stat_results["categorical_metrics"].items():
+        print(f"\n{col}:")
+        print(f"  Wasserstein Distance: {metrics['wasserstein']:.4f}")
+        print(f"  TV Distance: {metrics['tv_distance']:.4f}")
 
     print("\nData Utility Results:")
     for metric, value in utility_results.items():
@@ -226,8 +247,14 @@ def main():
 
     # Plot distributions
     print("\nGenerating distribution plots...")
-    plot_distributions(real_data, synthetic_data, info)
-    print("Plots saved to distributions.png")
+    plot_distributions(real_data, synthetic_data, stat_results)
+    print("Plots saved to evaluation_plots/")
+
+    # Save results
+    results = {"statistical_similarity": stat_results, "data_utility": utility_results}
+    with open("evaluation_results.json", "w") as f:
+        json.dump(results, f, indent=4)
+    print("\nResults saved to evaluation_results.json")
 
 
 if __name__ == "__main__":
