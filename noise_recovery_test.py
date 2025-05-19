@@ -4,6 +4,7 @@ import argparse
 from tqdm import tqdm
 from tabsyn.model import MLPDiffusion, Model
 from tabsyn.latent_utils import get_input_generate
+from tabsyn.diffusion_utils import sample
 import json
 import os
 
@@ -15,19 +16,35 @@ def generate_samples_with_noise(
     all_samples = []
     all_noise = []
 
-    for i in tqdm(range(0, num_samples, batch_size), desc="Generating samples"):
-        batch_size_curr = min(batch_size, num_samples - i)
+    # Start with a smaller batch size and adjust based on memory
+    current_batch_size = min(batch_size, 256)  # Start with smaller batches
 
-        # Generate noise
-        noise = torch.randn([batch_size_curr, in_dim], device=device)
-        all_noise.append(noise)
+    for i in tqdm(range(0, num_samples, current_batch_size), desc="Generating samples"):
+        try:
+            batch_size_curr = min(current_batch_size, num_samples - i)
 
-        # Generate samples using the noise
-        with torch.no_grad():
-            samples = model.sample_ddim(
-                batch_size_curr, in_dim, num_steps=50, eta=0.0, noise=noise
-            )
-            all_samples.append(samples)
+            # Generate noise
+            noise = torch.randn([batch_size_curr, in_dim], device=device)
+            all_noise.append(noise)
+
+            # Generate samples using the noise
+            with torch.no_grad():
+                x_next = sample(model.denoise_fn_D, batch_size_curr, in_dim)
+                x_next = x_next * 2 + mean.to(device)
+                all_samples.append(x_next)
+
+            # Try to increase batch size if memory allows
+            if i + current_batch_size >= num_samples:
+                current_batch_size = min(current_batch_size * 2, batch_size)
+
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                # If OOM, reduce batch size and retry
+                current_batch_size = max(current_batch_size // 2, 64)
+                torch.cuda.empty_cache()
+                continue
+            else:
+                raise e
 
     return torch.cat(all_samples, dim=0), torch.cat(all_noise, dim=0)
 
