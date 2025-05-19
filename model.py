@@ -219,6 +219,22 @@ class Model(nn.Module):
             P_mean, P_std, sigma_data, hid_dim=hid_dim, gamma=5, opts=None
         )
 
+    def load_state_dict(self, state_dict, strict=True):
+        """Custom load_state_dict to handle missing scheduler parameters."""
+        # Create a new state dict without the scheduler parameters
+        filtered_state_dict = {
+            k: v
+            for k, v in state_dict.items()
+            if not any(x in k for x in ["alpha_t", "sigma_t", "lambda_t"])
+        }
+
+        # Load the filtered state dict
+        super().load_state_dict(filtered_state_dict, strict=False)
+
+        # Initialize scheduler parameters if they don't exist
+        if not hasattr(self.denoise_fn_D, "alpha_t"):
+            self.denoise_fn_D._init_scheduler_params()
+
     def round_sigma(self, sigma):
         """Round sigma values to valid range."""
         return self.denoise_fn_D.round_sigma(sigma)
