@@ -49,6 +49,56 @@ def generate_samples_with_noise(
     return torch.cat(all_samples, dim=0), torch.cat(all_noise, dim=0)
 
 
+def fixedpoint_correction(
+    x, s, t, x_t, net, order=1, n_iter=500, step_size=0.1, th=1e-3
+):
+    """Fixed-point correction algorithm for improving inverse diffusion results."""
+    input = x.clone()
+    original_step_size = step_size
+
+    # Convert timesteps to indices for accessing scheduler parameters
+    s_idx = s.item() if isinstance(s, torch.Tensor) else s
+    t_idx = t.item() if isinstance(t, torch.Tensor) else t
+
+    # Pre-compute scheduler parameters
+    sigma_s = net.sigma_t[s_idx]
+    sigma_t = net.sigma_t[t_idx]
+    alpha_s = net.alpha_t[s_idx]
+    alpha_t = net.alpha_t[t_idx]
+    lambda_s = net.lambda_t[s_idx]
+    lambda_t = net.lambda_t[t_idx]
+    phi_1 = torch.expm1(-(lambda_t - lambda_s))
+
+    # Pre-compute constants to avoid repeated calculations
+    sigma_ratio = sigma_t / sigma_s
+    alpha_phi = alpha_t * phi_1
+
+    for i in range(n_iter):
+        # Scale input according to noise level
+        latent_model_input = input
+
+        # Get noise prediction with memory optimization
+        with torch.no_grad():
+            noise_pred = net(latent_model_input, t)
+            # Calculate predicted x_t
+            x_t_pred = sigma_ratio * input - alpha_phi * noise_pred
+
+            # Calculate loss
+            loss = torch.nn.functional.mse_loss(x_t_pred, x_t, reduction="sum")
+
+            if loss.item() < th:
+                break
+
+            # Forward step method
+            input = input - step_size * (x_t_pred - x_t)
+
+            # Clear unnecessary tensors
+            del noise_pred, x_t_pred
+            torch.cuda.empty_cache()
+
+    return input
+
+
 def evaluate_noise_recovery(model, samples, original_noise, device, num_steps=20):
     """Evaluate how well the model can recover the original noise."""
     print("\nEvaluating noise recovery...")
@@ -61,12 +111,23 @@ def evaluate_noise_recovery(model, samples, original_noise, device, num_steps=20
 
     # Process each sample
     for i in tqdm(range(len(samples)), desc="Recovering noise"):
-        # Recover noise using inverse diffusion
+        # Get the sample
+        x = samples[i : i + 1]
+
+        # Recover noise using inverse diffusion with fixed-point correction
         with torch.no_grad():
-            # Use inverse_diffusion to recover latents
-            recovered_latent = model.inverse_diffusion(
-                samples[i : i + 1], num_steps=num_steps
+            # First perform inverse diffusion
+            s = torch.tensor(0, device=device)
+            t = torch.tensor(num_steps - 1, device=device)
+
+            # Get initial estimate using inverse diffusion
+            latents = model.inverse_diffusion(x, num_steps=num_steps)
+
+            # Apply fixed-point correction
+            recovered_latent = fixedpoint_correction(
+                latents, s, t, x, model.denoise_fn_D, order=1, n_iter=500, step_size=0.1
             )
+
             recovered_noise.append(recovered_latent)
 
             # Calculate statistics for this sample
