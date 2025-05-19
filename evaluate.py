@@ -78,7 +78,15 @@ def evaluate_data_utility(real_data, synthetic_data, info):
     X_real = X_real[common_cols]
     X_syn = X_syn[common_cols]
 
+    # Handle target variable based on task type
     if info["task_type"] == "classification":
+        # For classification, ensure target is properly encoded
+        from sklearn.preprocessing import LabelEncoder
+
+        le = LabelEncoder()
+        y_real = le.fit_transform(y_real)
+        y_syn = le.transform(y_syn)
+
         # Train on synthetic, test on real
         model = LogisticRegression(max_iter=1000)
         model.fit(X_syn, y_syn)
@@ -91,18 +99,38 @@ def evaluate_data_utility(real_data, synthetic_data, info):
         y_pred_baseline = model_baseline.predict(X_real)
         results["baseline_accuracy"] = accuracy_score(y_real, y_pred_baseline)
 
+        # Additional classification metrics
+        from sklearn.metrics import precision_score, recall_score, f1_score
+
+        results["precision"] = precision_score(y_real, y_pred, average="weighted")
+        results["recall"] = recall_score(y_real, y_pred, average="weighted")
+        results["f1"] = f1_score(y_real, y_pred, average="weighted")
+
     else:  # regression
+        # For regression, ensure target is numeric
+        y_real = pd.to_numeric(y_real, errors="coerce")
+        y_syn = pd.to_numeric(y_syn, errors="coerce")
+
+        # Remove any rows with NaN values
+        mask = ~(np.isnan(y_real) | np.isnan(y_syn))
+        X_real = X_real[mask]
+        X_syn = X_syn[mask]
+        y_real = y_real[mask]
+        y_syn = y_syn[mask]
+
         # Train on synthetic, test on real
         model = LinearRegression()
         model.fit(X_syn, y_syn)
         y_pred = model.predict(X_real)
         results["mse"] = mean_squared_error(y_real, y_pred)
+        results["rmse"] = np.sqrt(results["mse"])
 
         # Train on real, test on real (baseline)
         model_baseline = LinearRegression()
         model_baseline.fit(X_real, y_real)
         y_pred_baseline = model_baseline.predict(X_real)
         results["baseline_mse"] = mean_squared_error(y_real, y_pred_baseline)
+        results["baseline_rmse"] = np.sqrt(results["baseline_mse"])
 
     return results
 
