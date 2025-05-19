@@ -149,8 +149,31 @@ class Precond(nn.Module):
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
         self.sigma_data = sigma_data
-        ###########
         self.denoise_fn_F = denoise_fn
+
+        # Initialize scheduler parameters
+        self._init_scheduler_params()
+
+    def _init_scheduler_params(self):
+        """Initialize scheduler parameters for inverse diffusion."""
+        num_steps = 1000
+        beta_start = 0.0001
+        beta_end = 0.02
+        betas = torch.linspace(beta_start, beta_end, num_steps)
+        alphas = 1 - betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+        self.alpha_t = alphas_cumprod
+        self.sigma_t = torch.sqrt((1 - alphas_cumprod) / alphas_cumprod)
+        self.lambda_t = torch.log(self.sigma_t)
+
+    def scale_model_input(self, x, t):
+        """Scale the model input according to the noise level."""
+        return x
+
+    def convert_model_output(self, noise_pred, t, x):
+        """Convert model output to denoised sample."""
+        return noise_pred
 
     def forward(self, x, sigma):
         x = x.to(torch.float32)
@@ -193,34 +216,9 @@ class Model(nn.Module):
             P_mean, P_std, sigma_data, hid_dim=hid_dim, gamma=5, opts=None
         )
 
-        # Add scheduler for inverse diffusion
-        self.scheduler = None
-        self.sigma_min = 0.002
-        self.sigma_max = 80
-        self.sigma_data = sigma_data
-
-        # Initialize scheduler parameters
-        self.alpha_t = None
-        self.sigma_t = None
-        self.lambda_t = None
-        self._init_scheduler_params()
-
-    def _init_scheduler_params(self):
-        """Initialize scheduler parameters for inverse diffusion."""
-        num_steps = 1000
-        beta_start = 0.0001
-        beta_end = 0.02
-        betas = torch.linspace(beta_start, beta_end, num_steps)
-        alphas = 1 - betas
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
-
-        self.alpha_t = alphas_cumprod
-        self.sigma_t = torch.sqrt((1 - alphas_cumprod) / alphas_cumprod)
-        self.lambda_t = torch.log(self.sigma_t)
-
     def round_sigma(self, sigma):
         """Round sigma values to valid range."""
-        return torch.clamp(sigma, min=self.sigma_min, max=self.sigma_max)
+        return self.denoise_fn_D.round_sigma(sigma)
 
     def inverse_diffusion(self, x, num_steps=50):
         """
