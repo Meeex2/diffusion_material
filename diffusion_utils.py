@@ -257,34 +257,40 @@ def fixedpoint_correction(
     s_idx = s.item() if isinstance(s, torch.Tensor) else s
     t_idx = t.item() if isinstance(t, torch.Tensor) else t
 
+    # Pre-compute scheduler parameters
+    sigma_s = net.sigma_t[s_idx]
+    sigma_t = net.sigma_t[t_idx]
+    alpha_s = net.alpha_t[s_idx]
+    alpha_t = net.alpha_t[t_idx]
+    lambda_s = net.lambda_t[s_idx]
+    lambda_t = net.lambda_t[t_idx]
+    phi_1 = torch.expm1(-(lambda_t - lambda_s))
+
+    # Pre-compute constants to avoid repeated calculations
+    sigma_ratio = sigma_t / sigma_s
+    alpha_phi = alpha_t * phi_1
+
     for i in range(n_iter):
         # Scale input according to noise level
         latent_model_input = input
 
-        # Get noise prediction
-        noise_pred = net(latent_model_input, t)
+        # Get noise prediction with memory optimization
+        with torch.no_grad():
+            noise_pred = net(latent_model_input, t)
+            # Calculate predicted x_t
+            x_t_pred = sigma_ratio * input - alpha_phi * noise_pred
 
-        # Calculate the predicted x_t using the current input
-        sigma_s = net.sigma_t[s_idx]
-        sigma_t = net.sigma_t[t_idx]
-        alpha_s = net.alpha_t[s_idx]
-        alpha_t = net.alpha_t[t_idx]
-        lambda_s = net.lambda_t[s_idx]
-        lambda_t = net.lambda_t[t_idx]
+            # Calculate loss
+            loss = torch.nn.functional.mse_loss(x_t_pred, x_t, reduction="sum")
 
-        # Calculate phi_1 term
-        phi_1 = torch.expm1(-(lambda_t - lambda_s))
+            if loss.item() < th:
+                break
 
-        # Calculate predicted x_t
-        x_t_pred = (sigma_t / sigma_s) * input - (alpha_t * phi_1) * noise_pred
+            # Forward step method
+            input = input - step_size * (x_t_pred - x_t)
 
-        # Calculate loss
-        loss = torch.nn.functional.mse_loss(x_t_pred, x_t, reduction="sum")
-
-        if loss.item() < th:
-            break
-
-        # Forward step method
-        input = input - step_size * (x_t_pred - x_t)
+            # Clear unnecessary tensors
+            del noise_pred, x_t_pred
+            torch.cuda.empty_cache()
 
     return input
