@@ -61,31 +61,31 @@ def evaluate_noise_recovery(model, samples, original_noise, device, num_steps=20
 
     # Process each sample
     for i in tqdm(range(len(samples)), desc="Recovering noise"):
-        # Start from middle of diffusion
-        t = torch.tensor([500], device=device)
-
-        # Recover noise
+        # Recover noise using inverse diffusion
         with torch.no_grad():
-            noise = model.recover_noise(samples[i : i + 1], t, num_steps=num_steps)
-            recovered_noise.append(noise)
+            # Use inverse_diffusion to recover latents
+            recovered_latent = model.inverse_diffusion(
+                samples[i : i + 1], num_steps=num_steps
+            )
+            recovered_noise.append(recovered_latent)
 
             # Calculate statistics for this sample
             stats = {
-                "mean": noise.mean().item(),
-                "std": noise.std().item(),
-                "min": noise.min().item(),
-                "max": noise.max().item(),
+                "mean": recovered_latent.mean().item(),
+                "std": recovered_latent.std().item(),
+                "min": recovered_latent.min().item(),
+                "max": recovered_latent.max().item(),
             }
             noise_stats.append(stats)
 
             # Compare with original noise
             orig_noise = original_noise[i : i + 1]
             comparison = {
-                "mean_diff": abs(noise.mean() - orig_noise.mean()).item(),
-                "std_diff": abs(noise.std() - orig_noise.std()).item(),
-                "mse": torch.mean((noise - orig_noise) ** 2).item(),
+                "mean_diff": abs(recovered_latent.mean() - orig_noise.mean()).item(),
+                "std_diff": abs(recovered_latent.std() - orig_noise.std()).item(),
+                "mse": torch.mean((recovered_latent - orig_noise) ** 2).item(),
                 "cosine_sim": torch.nn.functional.cosine_similarity(
-                    noise.view(1, -1), orig_noise.view(1, -1)
+                    recovered_latent.view(1, -1), orig_noise.view(1, -1)
                 ).item(),
             }
             comparison_stats.append(comparison)
