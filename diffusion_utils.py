@@ -253,18 +253,32 @@ def fixedpoint_correction(
     input = x.clone()
     original_step_size = step_size
 
+    # Convert timesteps to indices for accessing scheduler parameters
+    s_idx = s.item() if isinstance(s, torch.Tensor) else s
+    t_idx = t.item() if isinstance(t, torch.Tensor) else t
+
     for i in range(n_iter):
+        # Scale input according to noise level
         latent_model_input = input
-        latent_model_input = net.scheduler.scale_model_input(latent_model_input, t)
 
-        noise_pred = net(latent_model_input, s)
-        model_output = net.scheduler.convert_model_output(noise_pred, s, input)
+        # Get noise prediction
+        noise_pred = net(latent_model_input, t)
 
-        x_t_pred = (net.scheduler.sigma_t[t] / net.scheduler.sigma_t[s]) * input - (
-            net.scheduler.alpha_t[t]
-            * torch.expm1(-(net.scheduler.lambda_t[t] - net.scheduler.lambda_t[s]))
-        ) * model_output
+        # Calculate the predicted x_t using the current input
+        sigma_s = net.sigma_t[s_idx]
+        sigma_t = net.sigma_t[t_idx]
+        alpha_s = net.alpha_t[s_idx]
+        alpha_t = net.alpha_t[t_idx]
+        lambda_s = net.lambda_t[s_idx]
+        lambda_t = net.lambda_t[t_idx]
 
+        # Calculate phi_1 term
+        phi_1 = torch.expm1(-(lambda_t - lambda_s))
+
+        # Calculate predicted x_t
+        x_t_pred = (sigma_t / sigma_s) * input - (alpha_t * phi_1) * noise_pred
+
+        # Calculate loss
         loss = torch.nn.functional.mse_loss(x_t_pred, x_t, reduction="sum")
 
         if loss.item() < th:

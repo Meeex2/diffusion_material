@@ -163,9 +163,12 @@ class Precond(nn.Module):
         alphas = 1 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
 
-        self.alpha_t = alphas_cumprod
-        self.sigma_t = torch.sqrt((1 - alphas_cumprod) / alphas_cumprod)
-        self.lambda_t = torch.log(self.sigma_t)
+        # Register buffers to ensure parameters are moved to the correct device
+        self.register_buffer("alpha_t", alphas_cumprod)
+        self.register_buffer(
+            "sigma_t", torch.sqrt((1 - alphas_cumprod) / alphas_cumprod)
+        )
+        self.register_buffer("lambda_t", torch.log(self.sigma_t))
 
     def scale_model_input(self, x, t):
         """Scale the model input according to the noise level."""
