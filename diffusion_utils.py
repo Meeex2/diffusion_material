@@ -21,28 +21,39 @@ S_noise = 1
 
 
 def sample(net, num_samples, dim, num_steps=50, device="cuda:0"):
+    """Generate samples using deterministic DDIM sampling."""
+    # Initialize latents with noise
     latents = torch.randn([num_samples, dim], device=device)
 
-    step_indices = torch.arange(num_steps, dtype=torch.float32, device=latents.device)
+    # Initialize scheduler parameters (exactly as in inverse_stable_diffusion.py)
+    timesteps = torch.arange(num_steps, device=device)
+    alpha_t = torch.cos((timesteps / num_steps) * torch.pi / 2)
+    sigma_t = torch.sin((timesteps / num_steps) * torch.pi / 2)
+    lambda_t = torch.log(alpha_t / sigma_t)
 
-    sigma_min = max(SIGMA_MIN, net.sigma_min)
-    sigma_max = min(SIGMA_MAX, net.sigma_max)
+    # DDIM sampling process
+    for t in reversed(range(num_steps)):
+        s = t
+        prev_t = t - 1 if t > 0 else 0
 
-    t_steps = (
-        sigma_max ** (1 / rho)
-        + step_indices
-        / (num_steps - 1)
-        * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))
-    ) ** rho
-    t_steps = torch.cat([net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])])
+        # Get scheduler parameters
+        lambda_s, lambda_t = lambda_t[s], lambda_t[prev_t]
+        sigma_s, sigma_t = sigma_t[s], sigma_t[prev_t]
+        alpha_s, alpha_t = alpha_t[s], alpha_t[prev_t]
+        h = lambda_t - lambda_s
+        phi_1 = torch.expm1(-h)
 
-    x_next = latents.to(torch.float32) * t_steps[0]
+        # Get noise prediction
+        with torch.no_grad():
+            noise_pred = net(latents, torch.tensor([s], device=device))
+            model_s = (
+                noise_pred  # In our case, model output is already noise prediction
+            )
 
-    with torch.no_grad():
-        for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):
-            x_next = sample_step(net, num_steps, i, t_cur, t_next, x_next)
+            # DDIM update (exactly as in inverse_stable_diffusion.py)
+            latents = (sigma_s / sigma_t) * (latents + alpha_t * phi_1 * model_s)
 
-    return x_next
+    return latents
 
 
 def sample_step(net, num_steps, i, t_cur, t_next, x_next):
@@ -192,92 +203,73 @@ class EDMLoss:
 
 
 def inverse_sample(net, x, num_steps=50, device="cuda:0"):
-    """
-    Inverse diffusion process to recover latents from generated samples.
-    Based on the PRC-Watermark implementation but adapted for tabular data.
-    """
-    step_indices = torch.arange(num_steps, dtype=torch.float32, device=x.device)
+    """Inverse diffusion process to recover latents from generated samples."""
+    # Initialize scheduler parameters (exactly as in inverse_stable_diffusion.py)
+    timesteps = torch.arange(num_steps, device=x.device)
+    alpha_t = torch.cos((timesteps / num_steps) * torch.pi / 2)
+    sigma_t = torch.sin((timesteps / num_steps) * torch.pi / 2)
+    lambda_t = torch.log(alpha_t / sigma_t)
 
-    sigma_min = max(SIGMA_MIN, net.sigma_min)
-    sigma_max = min(SIGMA_MAX, net.sigma_max)
+    # Initialize latents with the input
+    latents = x.clone()
 
-    t_steps = (
-        sigma_max ** (1 / rho)
-        + step_indices
-        / (num_steps - 1)
-        * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))
-    ) ** rho
-    t_steps = torch.cat([net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])])
+    # Inverse DDIM process
+    for t in range(num_steps):
+        s = t
+        next_t = t + 1 if t < num_steps - 1 else num_steps - 1
 
-    x_next = x.clone()
+        # Get scheduler parameters
+        lambda_s, lambda_t = lambda_t[s], lambda_t[next_t]
+        sigma_s, sigma_t = sigma_t[s], sigma_t[next_t]
+        alpha_s, alpha_t = alpha_t[s], alpha_t[next_t]
+        h = lambda_t - lambda_s
+        phi_1 = torch.expm1(-h)
 
-    with torch.no_grad():
-        for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):
-            x_next = inverse_sample_step(net, num_steps, i, t_cur, t_next, x_next)
+        # Get noise prediction
+        with torch.no_grad():
+            noise_pred = net(latents, torch.tensor([s], device=device))
+            model_s = (
+                noise_pred  # In our case, model output is already noise prediction
+            )
 
-    return x_next
+            # Inverse DDIM update (exactly as in inverse_stable_diffusion.py)
+            latents = (sigma_t / sigma_s) * (latents - alpha_t * phi_1 * model_s)
 
-
-def inverse_sample_step(net, num_steps, i, t_cur, t_next, x_next):
-    """
-    Single step of inverse diffusion process.
-    """
-    x_cur = x_next
-
-    # Increase noise temporarily
-    gamma = min(S_churn / num_steps, np.sqrt(2) - 1) if S_min <= t_cur <= S_max else 0
-    t_hat = net.round_sigma(t_cur + gamma * t_cur)
-    x_hat = x_cur + (t_hat**2 - t_cur**2).sqrt() * S_noise * randn_like(x_cur)
-
-    # Inverse Euler step
-    denoised = net(x_hat, t_hat).to(torch.float32)
-    d_cur = (x_hat - denoised) / t_hat
-    x_next = x_hat + (t_next - t_hat) * d_cur
-
-    # Apply 2nd order correction
-    if i < num_steps - 1:
-        denoised = net(x_next, t_next).to(torch.float32)
-        d_prime = (x_next - denoised) / t_next
-        x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
-
-    return x_next
+    return latents
 
 
 def fixedpoint_correction(
     x, s, t, x_t, net, order=1, n_iter=500, step_size=0.1, th=1e-3
 ):
-    """
-    Fixed-point correction algorithm for improving inverse diffusion results.
-    Adapted from PRC-Watermark for tabular data.
-    """
+    """Fixed-point correction algorithm for improving inverse diffusion results."""
     input = x.clone()
     original_step_size = step_size
 
-    # Convert timesteps to indices for accessing scheduler parameters
+    # Initialize scheduler parameters (exactly as in inverse_stable_diffusion.py)
+    num_steps = 20  # Should match the number of steps used in generation
+    timesteps = torch.arange(num_steps, device=x.device)
+    alpha_t = torch.cos((timesteps / num_steps) * torch.pi / 2)
+    sigma_t = torch.sin((timesteps / num_steps) * torch.pi / 2)
+    lambda_t = torch.log(alpha_t / sigma_t)
+
+    # Get scheduler parameters
     s_idx = s.item() if isinstance(s, torch.Tensor) else s
     t_idx = t.item() if isinstance(t, torch.Tensor) else t
+    lambda_s, lambda_t = lambda_t[s_idx], lambda_t[t_idx]
+    sigma_s, sigma_t = sigma_t[s_idx], sigma_t[t_idx]
+    alpha_s, alpha_t = alpha_t[s_idx], alpha_t[t_idx]
+    h = lambda_t - lambda_s
+    phi_1 = torch.expm1(-h)
 
-    # Pre-compute scheduler parameters
-    sigma_s = net.sigma_t[s_idx]
-    sigma_t = net.sigma_t[t_idx]
-    alpha_s = net.alpha_t[s_idx]
-    alpha_t = net.alpha_t[t_idx]
-    lambda_s = net.lambda_t[s_idx]
-    lambda_t = net.lambda_t[t_idx]
-    phi_1 = torch.expm1(-(lambda_t - lambda_s))
-
-    # Pre-compute constants to avoid repeated calculations
+    # Pre-compute constants
     sigma_ratio = sigma_t / sigma_s
     alpha_phi = alpha_t * phi_1
 
     for i in range(n_iter):
-        # Scale input according to noise level
-        latent_model_input = input
-
-        # Get noise prediction with memory optimization
+        # Get noise prediction
         with torch.no_grad():
-            noise_pred = net(latent_model_input, t)
-            # Calculate predicted x_t
+            noise_pred = net(input, t)
+            # Calculate predicted x_t (exactly as in inverse_stable_diffusion.py)
             x_t_pred = sigma_ratio * input - alpha_phi * noise_pred
 
             # Calculate loss
