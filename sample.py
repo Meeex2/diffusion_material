@@ -1,4 +1,4 @@
-mport torch
+import torch
 import argparse
 import warnings
 import time
@@ -12,9 +12,12 @@ from tabsyn.diffusion_utils import sample
 warnings.filterwarnings("ignore")
 
 
-def generate_samples(model, num_samples, sample_dim, mean, device, batch_size=1024):
-    """Generate samples using the diffusion model in batches."""
+def generate_samples(
+    model, num_samples, sample_dim, mean, device, batch_size=1024, num_steps=20
+):
+    """Generate samples using deterministic DDIM sampling in batches."""
     all_samples = []
+    all_noise = []  # Keep track of the noise used
 
     # Start with a smaller batch size and adjust based on memory
     current_batch_size = min(batch_size, 256)  # Start with smaller batches
@@ -23,9 +26,11 @@ def generate_samples(model, num_samples, sample_dim, mean, device, batch_size=10
         try:
             batch_size_curr = min(current_batch_size, num_samples - i)
 
-            # Generate samples with memory optimization
-            with torch.cuda.amp.autocast():  # Use automatic mixed precision
-                x_next = sample(model.denoise_fn_D, batch_size_curr, sample_dim)
+            # Generate samples using DDIM sampling
+            with torch.no_grad():
+                x_next = sample(
+                    model.denoise_fn_D, batch_size_curr, sample_dim, num_steps=num_steps
+                )
                 x_next = x_next * 2 + mean.to(device)
 
             # Move to CPU and clear GPU memory
@@ -66,10 +71,9 @@ def reconstruct_latents(model, samples, num_steps=50, n_iter=500, batch_size=256
             batch_samples = samples[i : i + batch_size_curr]
 
             # Process batch with memory optimization
-            with torch.cuda.amp.autocast():  # Use automatic mixed precision
-                latents = model.reconstruct_latent(
-                    batch_samples, num_steps=num_steps, n_iter=n_iter
-                )
+            latents = model.reconstruct_latent(
+                batch_samples, num_steps=num_steps, n_iter=n_iter
+            )
 
             # Move to CPU and clear GPU memory
             all_latents.append(latents.cpu())
@@ -114,9 +118,15 @@ def main(args):
     num_samples = train_z.shape[0]
     sample_dim = in_dim
 
-    # Generate samples in batches
+    # Generate samples in batches using DDIM sampling
     x_next = generate_samples(
-        model, num_samples, sample_dim, mean, device, batch_size=batch_size
+        model,
+        num_samples,
+        sample_dim,
+        mean,
+        device,
+        batch_size=batch_size,
+        num_steps=steps,
     )
 
     # If inverse path is provided, perform inverse diffusion
