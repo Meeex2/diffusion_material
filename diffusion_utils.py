@@ -5,7 +5,7 @@ import torch
 import numpy as np
 from scipy.stats import betaprime
 # ----------------------------------------------------------------------------
-# Loss function corresponding to the variance preserving (VP) formulation
+# Loss function corresponding to the variance preserving (VP) formulations
 # from the paper "Score-Based Generative Modeling through Stochastic
 # Differential Equations".
 
