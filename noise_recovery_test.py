@@ -4,15 +4,15 @@ import argparse
 from tqdm import tqdm
 from tabsyn.model import MLPDiffusion, Model
 from tabsyn.latent_utils import get_input_generate
-from tabsyn.diffusion_utils import sample
+from tabsyn.diffusion_utils import sample, inverse_sample, fixedpoint_correction
 import json
 import os
 
 
 def generate_samples_with_noise(
-    model, num_samples, in_dim, mean, device, batch_size=1024
+    model, num_samples, in_dim, mean, device, batch_size=1024, num_steps=20
 ):
-    """Generate samples while keeping track of the noise used."""
+    """Generate samples using deterministic DDIM sampling while keeping track of the noise used."""
     all_samples = []
     all_noise = []
 
@@ -23,13 +23,15 @@ def generate_samples_with_noise(
         try:
             batch_size_curr = min(current_batch_size, num_samples - i)
 
-            # Generate noise
+            # Generate initial noise
             noise = torch.randn([batch_size_curr, in_dim], device=device)
             all_noise.append(noise)
 
-            # Generate samples using the noise
+            # Generate samples using DDIM sampling
             with torch.no_grad():
-                x_next = sample(model.denoise_fn_D, batch_size_curr, in_dim)
+                x_next = sample(
+                    model.denoise_fn_D, batch_size_curr, in_dim, num_steps=num_steps
+                )
                 x_next = x_next * 2 + mean.to(device)
                 all_samples.append(x_next)
 
@@ -56,30 +58,30 @@ def fixedpoint_correction(
     input = x.clone()
     original_step_size = step_size
 
-    # Convert timesteps to indices for accessing scheduler parameters
+    # Initialize scheduler parameters
+    num_steps = 20  # Should match the number of steps used in generation
+    timesteps = torch.arange(num_steps, device=x.device)
+    alpha_t = torch.cos((timesteps / num_steps) * torch.pi / 2)
+    sigma_t = torch.sin((timesteps / num_steps) * torch.pi / 2)
+    lambda_t = torch.log(alpha_t / sigma_t)
+
+    # Get scheduler parameters
     s_idx = s.item() if isinstance(s, torch.Tensor) else s
     t_idx = t.item() if isinstance(t, torch.Tensor) else t
+    lambda_s, lambda_t = lambda_t[s_idx], lambda_t[t_idx]
+    sigma_s, sigma_t = sigma_t[s_idx], sigma_t[t_idx]
+    alpha_s, alpha_t = alpha_t[s_idx], alpha_t[t_idx]
+    h = lambda_t - lambda_s
+    phi_1 = torch.expm1(-h)
 
-    # Pre-compute scheduler parameters
-    sigma_s = net.sigma_t[s_idx]
-    sigma_t = net.sigma_t[t_idx]
-    alpha_s = net.alpha_t[s_idx]
-    alpha_t = net.alpha_t[t_idx]
-    lambda_s = net.lambda_t[s_idx]
-    lambda_t = net.lambda_t[t_idx]
-    phi_1 = torch.expm1(-(lambda_t - lambda_s))
-
-    # Pre-compute constants to avoid repeated calculations
+    # Pre-compute constants
     sigma_ratio = sigma_t / sigma_s
     alpha_phi = alpha_t * phi_1
 
     for i in range(n_iter):
-        # Scale input according to noise level
-        latent_model_input = input
-
-        # Get noise prediction with memory optimization
+        # Get noise prediction
         with torch.no_grad():
-            noise_pred = net(latent_model_input, t)
+            noise_pred = net(input, t)
             # Calculate predicted x_t
             x_t_pred = sigma_ratio * input - alpha_phi * noise_pred
 
@@ -121,7 +123,7 @@ def evaluate_noise_recovery(model, samples, original_noise, device, num_steps=20
             t = torch.tensor(num_steps - 1, device=device)
 
             # Get initial estimate using inverse diffusion
-            latents = model.inverse_diffusion(x, num_steps=num_steps)
+            latents = inverse_sample(model.denoise_fn_D, x, num_steps=num_steps)
 
             # Apply fixed-point correction
             recovered_latent = fixedpoint_correction(
@@ -214,7 +216,13 @@ def main():
     # Generate samples with known noise
     print("\nGenerating samples with known noise...")
     samples, original_noise = generate_samples_with_noise(
-        model, args.num_samples, in_dim, train_z.mean(0), args.device, args.batch_size
+        model,
+        args.num_samples,
+        in_dim,
+        train_z.mean(0),
+        args.device,
+        args.batch_size,
+        args.num_steps,
     )
 
     # Save samples and original noise
