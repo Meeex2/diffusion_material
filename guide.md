@@ -26,3 +26,14 @@ python tabsyn/noise_recovery_test.py \
     --num_steps 20 \
     --save_dir noise_recovery_test
 ```
+
+Generate samples
+
+```
+python tabsyn/sample.py \
+    --dataname adult \
+    --device cuda:0 \
+    --steps 20 \
+    --save_path sample.csv \
+    --batch_size 1024
+```
