@@ -224,10 +224,13 @@ def inverse_sample(net, x, num_steps=50, device="cuda:0"):
         next_t = t + 1 if t < num_steps - 1 else num_steps - 1
 
         # Get scheduler parameters
-        lambda_s, lambda_t = lambda_t[s], lambda_t[next_t]
-        sigma_s, sigma_t = sigma_t[s], sigma_t[next_t]
-        alpha_s, alpha_t = alpha_t[s], alpha_t[next_t]
-        h = lambda_t - lambda_s
+        lambda_s = lambda_t[s]
+        lambda_t_next = lambda_t[next_t]
+        sigma_s = sigma_t[s]
+        sigma_t_next = sigma_t[next_t]
+        alpha_s = alpha_t[s]
+        alpha_t_next = alpha_t[next_t]
+        h = lambda_t_next - lambda_s
         phi_1 = torch.expm1(-h)
 
         # Get noise prediction
@@ -238,7 +241,9 @@ def inverse_sample(net, x, num_steps=50, device="cuda:0"):
             )
 
             # Inverse DDIM update (exactly as in inverse_stable_diffusion.py)
-            latents = (sigma_t / sigma_s) * (latents - alpha_t * phi_1 * model_s)
+            latents = (sigma_t_next / sigma_s) * (
+                latents - alpha_t_next * phi_1 * model_s
+            )
 
     return latents
 
@@ -260,15 +265,18 @@ def fixedpoint_correction(
     # Get scheduler parameters
     s_idx = s.item() if isinstance(s, torch.Tensor) else s
     t_idx = t.item() if isinstance(t, torch.Tensor) else t
-    lambda_s, lambda_t = lambda_t[s_idx], lambda_t[t_idx]
-    sigma_s, sigma_t = sigma_t[s_idx], sigma_t[t_idx]
-    alpha_s, alpha_t = alpha_t[s_idx], alpha_t[t_idx]
-    h = lambda_t - lambda_s
+    lambda_s = lambda_t[s_idx]
+    lambda_t_next = lambda_t[t_idx]
+    sigma_s = sigma_t[s_idx]
+    sigma_t_next = sigma_t[t_idx]
+    alpha_s = alpha_t[s_idx]
+    alpha_t_next = alpha_t[t_idx]
+    h = lambda_t_next - lambda_s
     phi_1 = torch.expm1(-h)
 
     # Pre-compute constants
-    sigma_ratio = sigma_t / sigma_s
-    alpha_phi = alpha_t * phi_1
+    sigma_ratio = sigma_t_next / sigma_s
+    alpha_phi = alpha_t_next * phi_1
 
     for i in range(n_iter):
         # Get noise prediction
