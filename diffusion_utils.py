@@ -274,8 +274,8 @@ def fixedpoint_correction(
     h = lambda_t_next - lambda_s
     phi_1 = torch.expm1(-h)
 
-    # Pre-compute constants
-    sigma_ratio = sigma_t_next / sigma_s
+    # Pre-compute constants with numerical stability
+    sigma_ratio = sigma_t_next / (sigma_s + 1e-8)  # Add small epsilon for stability
     alpha_phi = alpha_t_next * phi_1
 
     for i in range(n_iter):
@@ -285,14 +285,19 @@ def fixedpoint_correction(
             # Calculate predicted x_t (exactly as in inverse_stable_diffusion.py)
             x_t_pred = sigma_ratio * input - alpha_phi * noise_pred
 
-            # Calculate loss
+            # Calculate loss with numerical stability
             loss = torch.nn.functional.mse_loss(x_t_pred, x_t, reduction="sum")
 
             if loss.item() < th:
                 break
 
-            # Forward step method
-            input = input - step_size * (x_t_pred - x_t)
+            # Forward step method with gradient clipping
+            grad = x_t_pred - x_t
+            grad_norm = torch.norm(grad)
+            if grad_norm > 1.0:
+                grad = grad / grad_norm
+
+            input = input - step_size * grad
 
             # Clear unnecessary tensors
             del noise_pred, x_t_pred
