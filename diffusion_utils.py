@@ -5,7 +5,7 @@ import torch
 import numpy as np
 from scipy.stats import betaprime
 # ----------------------------------------------------------------------------
-# Loss function corresponding to the variance preserving (VP) formulations
+# Loss function corresponding to the variance preserving (VP) formulation
 # from the paper "Score-Based Generative Modeling through Stochastic
 # Differential Equations".
 
@@ -37,10 +37,13 @@ def sample(net, num_samples, dim, num_steps=50, device="cuda:0"):
         prev_t = t - 1 if t > 0 else 0
 
         # Get scheduler parameters
-        lambda_s, lambda_t = lambda_t[s], lambda_t[prev_t]
-        sigma_s, sigma_t = sigma_t[s], sigma_t[prev_t]
-        alpha_s, alpha_t = alpha_t[s], alpha_t[prev_t]
-        h = lambda_t - lambda_s
+        lambda_s = lambda_t[s]
+        lambda_t_next = lambda_t[prev_t]
+        sigma_s = sigma_t[s]
+        sigma_t_next = sigma_t[prev_t]
+        alpha_s = alpha_t[s]
+        alpha_t_next = alpha_t[prev_t]
+        h = lambda_t_next - lambda_s
         phi_1 = torch.expm1(-h)
 
         # Get noise prediction
@@ -51,7 +54,9 @@ def sample(net, num_samples, dim, num_steps=50, device="cuda:0"):
             )
 
             # DDIM update (exactly as in inverse_stable_diffusion.py)
-            latents = (sigma_s / sigma_t) * (latents + alpha_t * phi_1 * model_s)
+            latents = (sigma_s / sigma_t_next) * (
+                latents + alpha_t_next * phi_1 * model_s
+            )
 
     return latents
 
