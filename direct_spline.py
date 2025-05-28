@@ -37,7 +37,7 @@ ndim = len(numerical_cols)
 # Build the bijector
 bijector = Chain(
     ShiftBounds(mins, maxs, B=4),  # Map data to [-4, 4] to avoid edge effects
-    RollingSplineCoupling(ndim, n_layers=5, B=5),  # Operate on [-5, 5]
+    RollingSplineCoupling(ndim, nlayers=5, B=5),  # Operate on [-5, 5]
 )
 
 # Define the latent distribution
