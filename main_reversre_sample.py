@@ -131,8 +131,8 @@ def deterministic_sample(net, num_samples, dim, num_steps=50, device='cuda:0', l
     return x_next, latent
 
 
-def retrieve_latent(net, sample, num_steps=50, device='cuda:0'):
-    """Recover initial latent from a generated sample"""
+def retrieve_latent(net, sample, num_steps=50, device='cuda:0', eps=1e-9):
+    """Recover initial latent from a generated sample with robust handling of t=0"""
     # Create the same sigma schedule as forward process
     step_indices = torch.arange(num_steps, dtype=torch.float32, device=device)
     
@@ -140,36 +140,55 @@ def retrieve_latent(net, sample, num_steps=50, device='cuda:0'):
     sigma_max = min(80, net.sigma_max)
     rho = 7
     
+    # Create forward sigma schedule
     t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (
                 sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
     t_steps = torch.cat([net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])])
     
-    # Reverse the time steps
-    rev_t_steps = t_steps.flip(0)
+    # Reverse the time steps, skipping t=0 initially
+    rev_t_steps = t_steps.flip(0)[1:]  # Start from last non-zero sigma
     x_prev = sample.clone()
+    
+    # Add small epsilon to prevent division by zero
+    safe_t_steps = t_steps.clone()
+    safe_t_steps[-1] = eps  # Replace 0 with epsilon
     
     # Reverse diffusion process
     with torch.no_grad():
-        for i, (t_prev, t_cur) in enumerate(zip(rev_t_steps[:-1], rev_t_steps[1:])):
-            # Compute denoised version at current step
-            denoised = net(x_prev, t_prev).to(torch.float32)
+        # First handle t=0 separately
+        t_prev = safe_t_steps[-1]  # Use epsilon instead of 0
+        denoised = net(x_prev, t_prev).to(torch.float32)
+        d_cur = (x_prev - denoised) / t_prev
+        
+        # Process remaining steps in reverse order
+        for i, t_cur in enumerate(rev_t_steps):
+            # Calculate time step difference
+            dt = t_cur - t_prev
             
-            # Reverse Heun's method correction
-            if i > 0:  # Apply correction for all but first step
-                # First get the Euler step estimate
-                d_cur = (x_prev - denoised) / t_prev
-                x_euler = x_prev - (t_cur - t_prev) * d_cur
+            # Get denoised estimate at current position
+            denoised_cur = net(x_prev, t_prev).to(torch.float32)
+            
+            # Compute gradient
+            d_cur = (x_prev - denoised_cur) / t_prev
+            
+            # Apply reverse Euler step
+            x_next = x_prev - dt * d_cur
+            
+            # Apply Heun's correction if not last step
+            if i < len(rev_t_steps) - 1:
+                # Estimate at next position
+                denoised_next = net(x_next, t_cur).to(torch.float32)
+                d_prime = (x_next - denoised_next) / t_cur
                 
-                # Get the corrected gradient
-                denoised2 = net(x_euler, t_cur).to(torch.float32)
-                d_prime = (x_euler - denoised2) / t_cur
+                # Average gradients
+                avg_d = 0.5 * (d_cur + d_prime)
                 
-                # Compute the reverse step
-                x_prev = x_prev - (t_cur - t_prev) * (0.5 * d_cur + 0.5 * d_prime)
-            else:
-                # For the first step (t=0), use simple Euler reverse
-                d_cur = (x_prev - denoised) / t_prev
-                x_prev = x_prev - (t_cur - t_prev) * d_cur
+                # Recompute position with better gradient estimate
+                x_next = x_prev - dt * avg_d
+            
+            # Update for next iteration
+            x_prev = x_next
+            t_prev = t_cur
     
     # The final state is the initial latent
     return x_prev
