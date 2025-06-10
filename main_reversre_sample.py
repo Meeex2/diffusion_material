@@ -12,13 +12,11 @@ def main(args):
     model = Model(denoise_fn=denoise_fn, hid_dim=train_z.shape[1]).to(device)
     model.load_state_dict(torch.load(f'{ckpt_path}/model.pt'))
     
-    '''
-        Generating samples    
-    '''
-    start_time = time.time()
+    # Generating samples
     num_samples = train_z.shape[0]
     sample_dim = in_dim
-
+    start_time = time.time()
+    
     # Generate samples and get initial latents
     x_next, init_latents = deterministic_sample(
         model.denoise_fn_D, 
@@ -28,7 +26,7 @@ def main(args):
         device=device
     )
     
-    # Save initial latents for later use
+    # Save initial latents
     latent_path = os.path.join(os.path.dirname(save_path), f"{os.path.basename(save_path)}_latents.pt")
     torch.save(init_latents.cpu(), latent_path)
     
@@ -44,12 +42,9 @@ def main(args):
     syn_df.rename(columns=idx_name_mapping, inplace=True)
     syn_df.to_csv(save_path, index=False)
     
-    '''
-        Latent retrieval demonstration
-    '''
-    # Select a sample to demonstrate latent retrieval
-    sample_idx = 0
-    sample_tensor = torch.tensor(syn_data[sample_idx], device=device).unsqueeze(0)
+    # Latent retrieval demonstration
+    sample_idx = 0  # First sample
+    sample_tensor = torch.tensor(syn_data[sample_idx], device=device).unsqueeze(0).float()
     
     # Retrieve latent from the sample
     recovered_latent = retrieve_latent(
@@ -81,7 +76,6 @@ def main(args):
     print('Time:', end_time - start_time)
     print('Saving sampled data to', save_path)
     print('Saving initial latents to', latent_path)
-
 
 ###########
 
